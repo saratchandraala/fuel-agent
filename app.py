@@ -7,14 +7,20 @@ import os
 import json
 import pandas as pd
 import math
+import requests
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 from anthropic import Anthropic
 import uvicorn
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -32,39 +38,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize geocoder
-geolocator = Nominatim(user_agent="fuel_bot_agent")
+# Geocoding API keys (optional - uses multiple providers for reliability)
+GEOCODIO_API_KEY = os.environ.get("GEOCODIO_API_KEY", "")
+OPENCAGE_API_KEY = os.environ.get("OPENCAGE_API_KEY", "")
 
 # Initialize Anthropic client
 client = Anthropic()
 
 # System prompt for the fuel bot
-SYSTEM_PROMPT = """You are the 10-4 Fuel Bot, an AI assistant for fuel price information.
+SYSTEM_PROMPT = """You are the 10-4 Fuel Bot. Provide fuel station info in this format:
 
-📊 RESPONSE FORMAT:
-Always provide:
-1. A markdown table with columns: Station Name | Price/Gal | Distance (mi) | City, State
-2. A brief summary with top recommendation
-3. For route queries, mention the route and highlight stations along the way
-
-📍 IMPORTANT RULES:
-- The CSV data has been pre-filtered and pre-sorted for you
-- When price filtering is active, data is sorted by price (lowest first)
-- When no price filter, data is sorted by distance (closest first)
-- For route queries, stations are filtered to those along or near the route
-- Show ALL stations from the CSV in your table IN THE SAME ORDER
-- DO NOT re-sort the data - keep the order as provided
-- Use the "DistanceFromUser" column values as-is (do NOT recalculate)
-- Format prices with $ symbol (e.g., $3.99)
-- Keep your response concise and helpful
-
-Example response:
 | Station Name | Price/Gal | Distance (mi) | City, State |
 |--------------|-----------|---------------|-------------|
-| QUIKTRIP 7134 | $3.29 | 10.5 | Atlanta, GA |
-| RACETRAC #688 | $3.69 | 15.2 | Macon, GA |
+| STATION | $X.XX | Y.Y | City, ST |
 
-**Top Recommendation:** QUIKTRIP 7134 offers the best price at $3.29/gal, just 10.5 miles away in Atlanta, GA."""
+Then add a brief recommendation (1-2 sentences max).
+
+RULES:
+- Show ALL stations from CSV in SAME ORDER
+- DO NOT repeat info from table in text
+- Format prices with $ (e.g., $3.99)
+- Keep response concise"""
 
 # Request/Response models
 class QueryRequest(BaseModel):
@@ -73,7 +67,7 @@ class QueryRequest(BaseModel):
     user_lat: Optional[float] = None
     user_lon: Optional[float] = None
     max_results: Optional[int] = 10
-    max_distance_miles: Optional[float] = None
+    max_distance_miles: Optional[float] = 50.0  # Default 50 miles radius
     fuel_type: Optional[str] = "diesel"  # diesel or regular
 
 class StationInfo(BaseModel):
@@ -90,23 +84,97 @@ class QueryResponse(BaseModel):
     stations: List[StationInfo]
     query_interpreted: str
 
-# Cache for geocoded locations
+# Cache for geocoded locations (persistent)
+GEOCODE_CACHE_FILE = "geocode_cache.json"
 location_cache: Dict[str, tuple] = {}
 
-def geocode_location(location: str) -> Optional[tuple]:
-    """Convert city, state to coordinates"""
-    if location in location_cache:
-        return location_cache[location]
-    
+def load_geocode_cache():
+    """Load geocode cache from file"""
+    global location_cache
+    if os.path.exists(GEOCODE_CACHE_FILE):
+        try:
+            with open(GEOCODE_CACHE_FILE, 'r') as f:
+                data = json.load(f)
+                # Convert lists back to tuples
+                location_cache = {k: tuple(v) for k, v in data.items()}
+                print(f"Loaded {len(location_cache)} cached locations from {GEOCODE_CACHE_FILE}")
+        except Exception as e:
+            print(f"Error loading geocode cache: {e}")
+            location_cache = {}
+    else:
+        location_cache = {}
+
+def save_geocode_cache():
+    """Save geocode cache to file"""
     try:
-        loc = geolocator.geocode(location + ", USA", timeout=10)
-        if loc:
-            coords = (loc.latitude, loc.longitude)
-            location_cache[location] = coords
-            return coords
+        # Convert tuples to lists for JSON serialization
+        data = {k: list(v) for k, v in location_cache.items()}
+        with open(GEOCODE_CACHE_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+        print(f"Saved {len(location_cache)} locations to {GEOCODE_CACHE_FILE}")
     except Exception as e:
-        print(f"Geocoding error for {location}: {e}")
-    return None
+        print(f"Error saving geocode cache: {e}")
+
+def geocode_location(location: str) -> Optional[tuple]:
+    """Convert city, state to coordinates using free geocoding APIs with persistent caching"""
+    # Check cache first (from file)
+    if location in location_cache:
+        print(f"📍 Cache hit: {location} -> {location_cache[location]}")
+        return location_cache[location]
+
+    coords = None
+
+    # Try Geocodio first (2,500 free requests/day, very fast)
+    if GEOCODIO_API_KEY:
+        try:
+            url = "https://api.geocod.io/v1.7/geocode"
+            params = {
+                "q": f"{location}, USA",
+                "api_key": GEOCODIO_API_KEY
+            }
+            response = requests.get(url, params=params, timeout=5)
+            data = response.json()
+
+            if data.get("results") and len(data["results"]) > 0:
+                result = data["results"][0]
+                lat = result["location"]["lat"]
+                lng = result["location"]["lng"]
+                coords = (lat, lng)
+                print(f"✓ Geocodio: {location} -> {coords}")
+        except Exception as e:
+            print(f"Geocodio error for {location}: {e}")
+
+    # Try OpenCage as fallback (2,500 free requests/day)
+    if not coords and OPENCAGE_API_KEY:
+        try:
+            url = "https://api.opencagedata.com/geocode/v1/json"
+            params = {
+                "q": f"{location}, USA",
+                "key": OPENCAGE_API_KEY,
+                "limit": 1
+            }
+            response = requests.get(url, params=params, timeout=5)
+            data = response.json()
+
+            if data.get("results") and len(data["results"]) > 0:
+                result = data["results"][0]
+                lat = result["geometry"]["lat"]
+                lng = result["geometry"]["lng"]
+                coords = (lat, lng)
+                print(f"✓ OpenCage: {location} -> {coords}")
+        except Exception as e:
+            print(f"OpenCage error for {location}: {e}")
+
+    # If no API keys are set, return None
+    if not coords and not GEOCODIO_API_KEY and not OPENCAGE_API_KEY:
+        print(f"⚠️  No geocoding API keys configured. Please add GEOCODIO_API_KEY or OPENCAGE_API_KEY to .env")
+
+    # Save to cache if we got coordinates
+    if coords:
+        location_cache[location] = coords
+        save_geocode_cache()  # Persist to file immediately
+
+    return coords
 
 def calculate_distance(coord1: tuple, coord2: tuple) -> float:
     """Calculate distance in miles between two coordinates"""
@@ -129,8 +197,8 @@ def is_point_near_route(point: tuple, start: tuple, end: tuple, max_deviation_mi
 def load_fuel_data(csv_path: str = "fuel_data.csv") -> pd.DataFrame:
     """Load and preprocess fuel data from CSV"""
     try:
-        # Read the CSV with tab delimiter based on the provided data format
-        df = pd.read_csv(csv_path, sep='\t')
+        # Read the CSV (comma-delimited format)
+        df = pd.read_csv(csv_path)
         
         # Clean up column names (remove leading/trailing spaces)
         df.columns = df.columns.str.strip()
@@ -185,10 +253,14 @@ def filter_stations_by_distance(
             dist = calculate_distance(user_coords, station_coords)
             distances.append(dist)
         else:
-            distances.append(float('inf'))
+            # Use None instead of inf for stations without coordinates
+            distances.append(None)
 
     df = df.copy()
     df['DistanceFromUser'] = distances
+
+    # Remove stations without valid coordinates (distance is None)
+    df = df[df['DistanceFromUser'].notna()]
 
     # Filter by max distance if specified
     if max_distance:
@@ -223,28 +295,45 @@ def filter_stations_on_route(
 
 def extract_locations_from_query(query: str) -> Dict[str, Any]:
     """Use Claude to extract location information from the query"""
-    extraction_prompt = f"""Extract location information from this fuel query. Return a JSON object with:
-- "user_location": the user's current location (city, state) if mentioned
-- "destination": destination location if this is a route query
-- "is_route_query": true if asking about fuel between two locations
-- "price_filter": any price constraints mentioned (e.g., "under $4")
-- "fuel_type": "diesel" or "regular" if specified, otherwise "diesel"
+    extraction_prompt = f"""Extract location information from this fuel query and return ONLY a JSON object.
 
 Query: "{query}"
 
-Return ONLY valid JSON, no explanation."""
+Return JSON with these fields:
+- "user_location": user's current location (city, state format) or null. Use this for "near X", "in X", "at X" queries.
+- "destination": destination location (city, state format) or null. Only use for route queries with "between X and Y".
+- "is_route_query": true if asking about fuel between two locations, false otherwise
+- "price_filter": any price constraints mentioned or null
+- "fuel_type": "diesel" or "regular" if specified, otherwise "diesel"
+
+Examples:
+- "Get fuel prices near Ogden, UT" -> {{"user_location": "Ogden, UT", "destination": null, "is_route_query": false, "price_filter": null, "fuel_type": "diesel"}}
+- "Get fuel between Atlanta and Florida" -> {{"user_location": "Atlanta, GA", "destination": "Florida", "is_route_query": true, "price_filter": null, "fuel_type": "diesel"}}
+
+Return ONLY the JSON object, nothing else."""
 
     try:
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=500,
+            max_tokens=200,
+            system="You are a JSON extraction tool. Return ONLY valid JSON, no explanation or markdown.",
             messages=[{"role": "user", "content": extraction_prompt}]
         )
-        
-        result = json.loads(response.content[0].text)
+
+        response_text = response.content[0].text.strip()
+        # Remove markdown code blocks if present
+        if response_text.startswith("```"):
+            response_text = response_text.split("```")[1]
+            if response_text.startswith("json"):
+                response_text = response_text[4:]
+            response_text = response_text.strip()
+
+        result = json.loads(response_text)
+        print(f"✓ Extracted: {result}")
         return result
     except Exception as e:
         print(f"Error extracting locations: {e}")
+        print(f"Response was: {response.content[0].text if 'response' in locals() else 'No response'}")
         return {
             "user_location": None,
             "destination": None,
@@ -273,8 +362,11 @@ fuel_data: pd.DataFrame = None
 
 @app.on_event("startup")
 async def startup_event():
-    """Load fuel data on startup"""
+    """Load fuel data and geocode cache on startup"""
     global fuel_data
+
+    # Load geocode cache from file
+    load_geocode_cache()
 
     # Check for fuel data file
     csv_paths = ["fuel_data.csv", "fuel_data.tsv", "/home/claude/fuel-agent/fuel_data.csv"]
@@ -284,11 +376,15 @@ async def startup_event():
             fuel_data = load_fuel_data(path)
             if not fuel_data.empty:
                 print(f"Loaded {len(fuel_data)} unique stations from {path}")
-                # Initialize coordinate columns but don't geocode on startup
-                # Geocoding will happen on-demand during queries
-                fuel_data['Latitude'] = None
-                fuel_data['Longitude'] = None
-                print("Fuel data loaded successfully. Geocoding will happen on-demand.")
+
+                # Pre-geocode all stations at startup for better performance
+                print("Pre-geocoding all stations...")
+                fuel_data = geocode_stations(fuel_data)
+
+                # Count how many stations have coordinates
+                geocoded_count = fuel_data[['Latitude', 'Longitude']].notna().all(axis=1).sum()
+                print(f"✅ Pre-geocoded {geocoded_count}/{len(fuel_data)} stations successfully")
+                print("Fuel data loaded and ready!")
                 break
 
     if fuel_data is None or fuel_data.empty:
@@ -298,12 +394,19 @@ async def startup_event():
 @app.get("/")
 async def root():
     """Health check endpoint"""
+    print("ROOT ENDPOINT CALLED!")  # Debug log
     return {
         "status": "online",
         "service": "10-4 Fuel Bot API",
         "version": "1.0.0",
         "stations_loaded": len(fuel_data) if fuel_data is not None else 0
     }
+
+@app.get("/test")
+async def test():
+    """Simple test endpoint"""
+    print("TEST ENDPOINT CALLED!")  # Debug log
+    return {"status": "ok", "message": "Test endpoint working"}
 
 @app.get("/stations")
 async def get_stations(limit: int = 20):
@@ -326,18 +429,26 @@ async def get_stations(limit: int = 20):
 
 @app.post("/query", response_model=QueryResponse)
 async def process_query(request: QueryRequest):
-    """Process a natural language fuel query"""
+    """Process a natural language fuel query with parallel processing"""
     global fuel_data
 
     if fuel_data is None or fuel_data.empty:
         raise HTTPException(status_code=503, detail="Fuel data not loaded")
 
-    # Extract location info from the query using Claude
-    extracted = extract_locations_from_query(request.query)
+    # Run location extraction in a thread pool to avoid blocking
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as executor:
+        extracted = await loop.run_in_executor(executor, extract_locations_from_query, request.query)
 
     # Determine user coordinates - prioritize explicit parameters over extracted
     user_coords = None
     user_location_str = None
+    location_required = True
+
+    # Check if this is a query that doesn't need location (e.g., "lowest price")
+    query_lower = request.query.lower()
+    if any(keyword in query_lower for keyword in ["lowest", "cheapest", "best price", "all stations"]):
+        location_required = False
 
     # Priority 1: Explicit lat/lon coordinates
     if request.user_lat is not None and request.user_lon is not None:
@@ -345,19 +456,23 @@ async def process_query(request: QueryRequest):
         user_location_str = f"({request.user_lat}, {request.user_lon})"
     # Priority 2: Explicit user_location parameter
     elif request.user_location:
-        user_coords = geocode_location(request.user_location)
+        # Run geocoding in parallel
+        with ThreadPoolExecutor() as executor:
+            user_coords = await loop.run_in_executor(executor, geocode_location, request.user_location)
         user_location_str = request.user_location
         if not user_coords:
             raise HTTPException(status_code=400, detail=f"Could not geocode location: {request.user_location}")
     # Priority 3: Location extracted from query by Claude
     elif extracted.get("user_location"):
-        user_coords = geocode_location(extracted["user_location"])
+        # Run geocoding in parallel
+        with ThreadPoolExecutor() as executor:
+            user_coords = await loop.run_in_executor(executor, geocode_location, extracted["user_location"])
         user_location_str = extracted["user_location"]
         if not user_coords:
             raise HTTPException(status_code=400, detail=f"Could not geocode location: {extracted['user_location']}")
 
-    # If no location provided at all, return error
-    if not user_coords:
+    # If no location provided and it's required, return error
+    if not user_coords and location_required:
         raise HTTPException(
             status_code=400,
             detail="Please provide a location using user_location (city, state) or user_lat/user_lon coordinates"
@@ -369,12 +484,14 @@ async def process_query(request: QueryRequest):
     # Handle route queries
     if extracted.get("is_route_query") and extracted.get("destination"):
         dest_coords = geocode_location(extracted["destination"])
-        if dest_coords:
+        if dest_coords and user_coords:
+            # For route queries, use a larger deviation (100 miles) to find stations along the way
+            route_deviation = 100  # miles
             filtered_data = filter_stations_on_route(
                 filtered_data,
                 user_coords,
                 dest_coords,
-                max_deviation=request.max_distance_miles or 50
+                max_deviation=route_deviation
             )
             # Calculate distance from start for route ordering
             if not filtered_data.empty:
@@ -382,34 +499,47 @@ async def process_query(request: QueryRequest):
         else:
             raise HTTPException(status_code=400, detail=f"Could not geocode destination: {extracted['destination']}")
 
-    # Filter by distance from user (default behavior)
-    else:
+    # Filter by distance from user (if location provided)
+    elif user_coords:
         filtered_data = filter_stations_by_distance(
             filtered_data,
             user_coords,
             max_distance=request.max_distance_miles
         )
 
+    # No location - just sort by price for queries like "lowest price"
+    else:
+        filtered_data = filtered_data.sort_values('PumpPrice')
+
     # Check if we have any results
     if filtered_data.empty:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No fuel stations found near {user_location_str}" +
-                   (f" within {request.max_distance_miles} miles" if request.max_distance_miles else "")
-        )
+        if extracted.get("is_route_query") and extracted.get("destination"):
+            raise HTTPException(
+                status_code=404,
+                detail=f"No fuel stations found on route from {user_location_str} to {extracted['destination']}"
+            )
+        elif user_location_str:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No fuel stations found near {user_location_str}" +
+                       (f" within {request.max_distance_miles} miles" if request.max_distance_miles else "")
+            )
+        else:
+            raise HTTPException(status_code=404, detail="No fuel stations found")
 
     # Sort by price if price filtering mentioned
-    if extracted.get("price_filter"):
+    if extracted.get("price_filter") or not user_coords:
         filtered_data = filtered_data.sort_values('PumpPrice')
 
     # Limit results
     filtered_data = filtered_data.head(request.max_results or 10)
-    
+
     # Prepare context for Claude
     data_context = prepare_data_for_llm(filtered_data, request.max_results or 10)
 
     # Generate response using Claude
-    user_message = f"""User query: {request.query}
+    if user_location_str:
+        user_message = f"""User query: {request.query}
 
 User location: {user_location_str}
 Query type: {'Route query' if extracted.get('is_route_query') else 'Nearby search'}
@@ -418,29 +548,52 @@ Destination: {extracted.get('destination', 'N/A')}
 Filtered fuel station data (CSV format):
 {data_context}
 
-Please provide a helpful response with the fuel station information in a markdown table format."""
+Please provide a helpful response with the fuel station information in a markdown table format. Do not repeat information already in the table."""
+    else:
+        user_message = f"""User query: {request.query}
 
+Query type: Showing stations sorted by price
+
+Fuel station data (CSV format):
+{data_context}
+
+Please provide a helpful response with the fuel station information in a markdown table format. Do not repeat information already in the table."""
+
+    # Run Claude API call in parallel to avoid blocking
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1500,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}]
-        )
-        
-        llm_response = response.content[0].text
+        def call_claude():
+            response = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=800,  # Reduced for faster responses
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_message}]
+            )
+            return response.content[0].text
+
+        with ThreadPoolExecutor() as executor:
+            llm_response = await loop.run_in_executor(executor, call_claude)
     except Exception as e:
         llm_response = f"Error generating response: {str(e)}"
     
     # Prepare station list for response
     stations = []
     for _, row in filtered_data.iterrows():
+        # Safely handle distance - ensure it's a valid number
+        distance = None
+        if 'DistanceFromUser' in row and pd.notna(row['DistanceFromUser']):
+            try:
+                dist_val = float(row['DistanceFromUser'])
+                if math.isfinite(dist_val):  # Check if it's not inf or nan
+                    distance = round(dist_val, 1)
+            except (ValueError, TypeError):
+                pass
+
         stations.append(StationInfo(
             station_name=row['TSName'],
             city=row['TSCity'],
             state=row['TSState'],
             price=round(row['PumpPrice'], 4),
-            distance_miles=round(row['DistanceFromUser'], 1) if 'DistanceFromUser' in row and pd.notna(row['DistanceFromUser']) else None,
+            distance_miles=distance,
             latitude=row.get('Latitude') if pd.notna(row.get('Latitude')) else None,
             longitude=row.get('Longitude') if pd.notna(row.get('Longitude')) else None
         ))
@@ -546,4 +699,4 @@ async def find_on_route(
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="debug", access_log=True)
