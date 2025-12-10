@@ -91,17 +91,38 @@ location_cache: Dict[str, tuple] = {}
 def load_geocode_cache():
     """Load geocode cache from file"""
     global location_cache
-    if os.path.exists(GEOCODE_CACHE_FILE):
-        try:
-            with open(GEOCODE_CACHE_FILE, 'r') as f:
-                data = json.load(f)
-                # Convert lists back to tuples
-                location_cache = {k: tuple(v) for k, v in data.items()}
-                print(f"Loaded {len(location_cache)} cached locations from {GEOCODE_CACHE_FILE}")
-        except Exception as e:
-            print(f"Error loading geocode cache: {e}")
-            location_cache = {}
-    else:
+
+    # Debug: print current working directory and file existence
+    cwd = os.getcwd()
+    print(f"Current working directory: {cwd}")
+    print(f"Looking for geocode cache at: {GEOCODE_CACHE_FILE}")
+    print(f"File exists: {os.path.exists(GEOCODE_CACHE_FILE)}")
+
+    # Try multiple possible locations
+    possible_paths = [
+        GEOCODE_CACHE_FILE,
+        os.path.join(cwd, GEOCODE_CACHE_FILE),
+        "/app/geocode_cache.json",  # Railway default
+        "./geocode_cache.json"
+    ]
+
+    cache_loaded = False
+    for path in possible_paths:
+        if os.path.exists(path):
+            try:
+                print(f"Found cache file at: {path}")
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                    # Convert lists back to tuples
+                    location_cache = {k: tuple(v) for k, v in data.items()}
+                    print(f"✅ Loaded {len(location_cache)} cached locations from {path}")
+                    cache_loaded = True
+                    break
+            except Exception as e:
+                print(f"Error loading geocode cache from {path}: {e}")
+
+    if not cache_loaded:
+        print(f"⚠️  No geocode cache file found. Checked paths: {possible_paths}")
         location_cache = {}
 
 def save_geocode_cache():
