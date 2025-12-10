@@ -327,11 +327,13 @@ Return JSON with these fields:
 - "price_filter": any price constraints mentioned or null
 - "fuel_type": "diesel" or "regular" if specified, otherwise "diesel"
 - "max_distance_miles": distance/radius in miles if mentioned (e.g., "within 100 miles", "50 mile radius") or null
+- "state_filter": 2-letter state code if user asks for a specific state (e.g., "GA", "CA", "TX") or null. Extract from queries like "in Georgia", "in California", etc.
 
 Examples:
-- "Get fuel prices near Ogden, UT" -> {{"user_location": "Ogden, UT", "destination": null, "is_route_query": false, "price_filter": null, "fuel_type": "diesel", "max_distance_miles": null}}
-- "Get fuel between Atlanta and Florida" -> {{"user_location": "Atlanta, GA", "destination": "Florida", "is_route_query": true, "price_filter": null, "fuel_type": "diesel", "max_distance_miles": null}}
-- "Show me prices under $4 within 100 miles" -> {{"user_location": null, "destination": null, "is_route_query": false, "price_filter": "under $4", "fuel_type": "diesel", "max_distance_miles": 100}}
+- "Get fuel prices near Ogden, UT" -> {{"user_location": "Ogden, UT", "destination": null, "is_route_query": false, "price_filter": null, "fuel_type": "diesel", "max_distance_miles": null, "state_filter": "UT"}}
+- "Get fuel between Atlanta and Florida" -> {{"user_location": "Atlanta, GA", "destination": "Florida", "is_route_query": true, "price_filter": null, "fuel_type": "diesel", "max_distance_miles": null, "state_filter": null}}
+- "Show me prices under $4 within 100 miles" -> {{"user_location": null, "destination": null, "is_route_query": false, "price_filter": "under $4", "fuel_type": "diesel", "max_distance_miles": 100, "state_filter": null}}
+- "Get me prices under $5 in Georgia" -> {{"user_location": "Georgia", "destination": null, "is_route_query": false, "price_filter": "under $5", "fuel_type": "diesel", "max_distance_miles": null, "state_filter": "GA"}}
 
 Return ONLY the JSON object, nothing else."""
 
@@ -363,7 +365,8 @@ Return ONLY the JSON object, nothing else."""
             "is_route_query": False,
             "price_filter": None,
             "fuel_type": "diesel",
-            "max_distance_miles": None
+            "max_distance_miles": None,
+            "state_filter": None
         }
 
 def prepare_data_for_llm(df: pd.DataFrame, max_results: int = 10) -> str:
@@ -654,6 +657,14 @@ async def process_query(request: QueryRequest):
     # No location - just sort by price for queries like "lowest price"
     else:
         filtered_data = filtered_data.sort_values('PumpPrice')
+
+    # Apply state filtering if specified (e.g., "in Georgia" should only show GA stations)
+    if extracted.get("state_filter"):
+        state_code = extracted["state_filter"].upper()
+        print(f"Applying state filter: {state_code}")
+        initial_count = len(filtered_data)
+        filtered_data = filtered_data[filtered_data['TSState'] == state_code]
+        print(f"Stations after state filtering: {len(filtered_data)} (removed {initial_count - len(filtered_data)} stations from other states)")
 
     # Apply price filtering if specified
     if extracted.get("price_filter"):
