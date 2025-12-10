@@ -534,7 +534,7 @@ async def process_query(request: QueryRequest):
 
     print(f"Extracted location info: {extracted}")
 
-    # Determine user coordinates - prioritize explicit parameters over extracted
+    # Determine user coordinates - smart logic to decide between query location vs GPS
     user_coords = None
     user_location_str = None
     location_required = True
@@ -544,30 +544,45 @@ async def process_query(request: QueryRequest):
     if any(keyword in query_lower for keyword in ["lowest", "cheapest", "best price", "all stations"]):
         location_required = False
 
-    # Priority 1: Explicit lat/lon coordinates
-    if request.user_lat is not None and request.user_lon is not None:
-        user_coords = (request.user_lat, request.user_lon)
-        user_location_str = f"({request.user_lat}, {request.user_lon})"
-    # Priority 2: Explicit user_location parameter
-    elif request.user_location:
-        print(f"Using explicit user_location: {request.user_location}")
-        # Run geocoding in parallel
-        with ThreadPoolExecutor() as executor:
-            user_coords = await loop.run_in_executor(executor, geocode_location, request.user_location)
-        user_location_str = request.user_location
-        print(f"Geocoded to: {user_coords}")
-        if not user_coords:
-            raise HTTPException(status_code=400, detail=f"Could not geocode location: {request.user_location}")
-    # Priority 3: Location extracted from query by Claude
-    elif extracted.get("user_location"):
-        print(f"Using extracted user_location: {extracted['user_location']}")
+    # SMART LOGIC: Decide whether to use extracted location or GPS coordinates
+    # If Claude extracted a SPECIFIC location (city, state), use that - ignore GPS
+    # If query is generic ("near me", "lowest price"), use GPS coordinates
+
+    has_specific_location = extracted.get("user_location") and extracted["user_location"] is not None
+    has_gps_coords = request.user_lat is not None and request.user_lon is not None
+
+    print(f"Smart location decision:")
+    print(f"  - Extracted location: {extracted.get('user_location')}")
+    print(f"  - Has GPS coords: {has_gps_coords}")
+    print(f"  - Query: {request.query}")
+
+    # Priority 1: If query mentions a SPECIFIC location, use that (ignore GPS)
+    if has_specific_location:
+        print(f"✓ Using SPECIFIC location from query: {extracted['user_location']}")
         # Run geocoding in parallel
         with ThreadPoolExecutor() as executor:
             user_coords = await loop.run_in_executor(executor, geocode_location, extracted["user_location"])
         user_location_str = extracted["user_location"]
-        print(f"Geocoded to: {user_coords}")
+        print(f"  Geocoded to: {user_coords}")
         if not user_coords:
             raise HTTPException(status_code=400, detail=f"Could not geocode location: {extracted['user_location']}")
+
+    # Priority 2: If no specific location but GPS available, use GPS
+    elif has_gps_coords:
+        print(f"✓ Using GPS coordinates: ({request.user_lat}, {request.user_lon})")
+        user_coords = (request.user_lat, request.user_lon)
+        user_location_str = f"your location ({request.user_lat:.4f}, {request.user_lon:.4f})"
+
+    # Priority 3: Explicit user_location parameter (fallback for manual override)
+    elif request.user_location:
+        print(f"✓ Using explicit user_location parameter: {request.user_location}")
+        # Run geocoding in parallel
+        with ThreadPoolExecutor() as executor:
+            user_coords = await loop.run_in_executor(executor, geocode_location, request.user_location)
+        user_location_str = request.user_location
+        print(f"  Geocoded to: {user_coords}")
+        if not user_coords:
+            raise HTTPException(status_code=400, detail=f"Could not geocode location: {request.user_location}")
 
     # If no location provided and it's required, return error
     if not user_coords and location_required:
