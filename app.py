@@ -464,6 +464,19 @@ async def debug_info():
 
     cache_checks = {path: os.path.exists(path) for path in cache_paths}
 
+    # Try to load CSV and see what happens
+    csv_load_error = None
+    csv_load_success = False
+    try:
+        test_df = pd.read_csv("fuel_data.csv")
+        csv_load_success = True
+        csv_rows = len(test_df)
+        csv_columns = list(test_df.columns)
+    except Exception as e:
+        csv_load_error = str(e)
+        csv_rows = 0
+        csv_columns = []
+
     return {
         "cwd": cwd,
         "files_in_cwd": files_in_cwd,
@@ -471,7 +484,13 @@ async def debug_info():
         "cache_path_checks": cache_checks,
         "fuel_data_loaded": fuel_data is not None and not fuel_data.empty,
         "stations_count": len(fuel_data) if fuel_data is not None else 0,
-        "location_cache_size": len(location_cache)
+        "location_cache_size": len(location_cache),
+        "csv_test_load": {
+            "success": csv_load_success,
+            "error": csv_load_error,
+            "rows": csv_rows,
+            "columns": csv_columns[:10] if csv_columns else []
+        }
     }
 
 @app.get("/stations")
