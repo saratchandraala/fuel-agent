@@ -1,6 +1,10 @@
 # Environment variables
 .env
 
+# Geocoding cache (contains API responses)
+# NOTE: geocode_cache.json is now committed to repo for Railway deployment
+# geocode_cache.json
+
 # Python
 __pycache__/
 *.py[cod]
