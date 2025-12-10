@@ -326,10 +326,12 @@ Return JSON with these fields:
 - "is_route_query": true if asking about fuel between two locations, false otherwise
 - "price_filter": any price constraints mentioned or null
 - "fuel_type": "diesel" or "regular" if specified, otherwise "diesel"
+- "max_distance_miles": distance/radius in miles if mentioned (e.g., "within 100 miles", "50 mile radius") or null
 
 Examples:
-- "Get fuel prices near Ogden, UT" -> {{"user_location": "Ogden, UT", "destination": null, "is_route_query": false, "price_filter": null, "fuel_type": "diesel"}}
-- "Get fuel between Atlanta and Florida" -> {{"user_location": "Atlanta, GA", "destination": "Florida", "is_route_query": true, "price_filter": null, "fuel_type": "diesel"}}
+- "Get fuel prices near Ogden, UT" -> {{"user_location": "Ogden, UT", "destination": null, "is_route_query": false, "price_filter": null, "fuel_type": "diesel", "max_distance_miles": null}}
+- "Get fuel between Atlanta and Florida" -> {{"user_location": "Atlanta, GA", "destination": "Florida", "is_route_query": true, "price_filter": null, "fuel_type": "diesel", "max_distance_miles": null}}
+- "Show me prices under $4 within 100 miles" -> {{"user_location": null, "destination": null, "is_route_query": false, "price_filter": "under $4", "fuel_type": "diesel", "max_distance_miles": 100}}
 
 Return ONLY the JSON object, nothing else."""
 
@@ -360,7 +362,8 @@ Return ONLY the JSON object, nothing else."""
             "destination": None,
             "is_route_query": False,
             "price_filter": None,
-            "fuel_type": "diesel"
+            "fuel_type": "diesel",
+            "max_distance_miles": None
         }
 
 def prepare_data_for_llm(df: pd.DataFrame, max_results: int = 10) -> str:
@@ -591,6 +594,32 @@ async def process_query(request: QueryRequest):
             detail="Please provide a location using user_location (city, state) or user_lat/user_lon coordinates"
         )
 
+    # SMART DISTANCE LOGIC: Determine max distance to use
+    # Priority 1: Distance mentioned in query (e.g., "within 100 miles")
+    # Priority 2: Smart default based on query type (price queries get larger radius)
+    # Priority 3: Distance from request parameter (max_distance_miles) - can override smart defaults
+
+    max_distance = None
+
+    if extracted.get("max_distance_miles"):
+        # User explicitly mentioned distance in query - highest priority
+        max_distance = extracted["max_distance_miles"]
+        print(f"✓ Using distance from query: {max_distance} miles")
+    else:
+        # Smart defaults based on query type
+        if extracted.get("price_filter"):
+            # For price-based queries, use larger radius to find matching prices
+            max_distance = 200.0  # 200 miles for price searches
+            print(f"✓ Using smart default for price query: {max_distance} miles")
+        elif request.max_distance_miles != 50.0:
+            # User provided a custom distance via API parameter (not the default)
+            max_distance = request.max_distance_miles
+            print(f"✓ Using custom distance from request parameter: {max_distance} miles")
+        else:
+            # For location-based queries, use standard radius
+            max_distance = 50.0  # 50 miles for "near me" queries
+            print(f"✓ Using standard default: {max_distance} miles")
+
     # Start with full dataset
     filtered_data = fuel_data.copy()
 
@@ -614,11 +643,11 @@ async def process_query(request: QueryRequest):
 
     # Filter by distance from user (if location provided)
     elif user_coords:
-        print(f"Filtering stations by distance from {user_coords} within {request.max_distance_miles} miles")
+        print(f"Filtering stations by distance from {user_coords} within {max_distance} miles")
         filtered_data = filter_stations_by_distance(
             filtered_data,
             user_coords,
-            max_distance=request.max_distance_miles
+            max_distance=max_distance
         )
         print(f"Found {len(filtered_data)} stations after distance filtering")
 
@@ -660,11 +689,12 @@ async def process_query(request: QueryRequest):
                 detail=f"No fuel stations found on route from {user_location_str} to {extracted['destination']}"
             )
         elif user_location_str:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No fuel stations found near {user_location_str}" +
-                       (f" within {request.max_distance_miles} miles" if request.max_distance_miles else "")
-            )
+            # Build error message with price filter info if applicable
+            error_msg = f"No fuel stations found near {user_location_str}"
+            if extracted.get("price_filter"):
+                error_msg += f" with prices {extracted['price_filter']}"
+            error_msg += f" within {max_distance} miles"
+            raise HTTPException(status_code=404, detail=error_msg)
         else:
             raise HTTPException(status_code=404, detail="No fuel stations found")
 
