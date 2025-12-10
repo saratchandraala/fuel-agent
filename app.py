@@ -158,27 +158,26 @@ def load_fuel_data(csv_path: str = "fuel_data.csv") -> pd.DataFrame:
         return pd.DataFrame()
 
 def geocode_stations(df: pd.DataFrame) -> pd.DataFrame:
-    """Add coordinates to stations dataframe"""
-    coords = []
-    for _, row in df.iterrows():
-        location = f"{row['TSCity']}, {row['TSState']}"
-        coord = geocode_location(location)
-        if coord:
-            coords.append({'lat': coord[0], 'lon': coord[1]})
-        else:
-            coords.append({'lat': None, 'lon': None})
-    
-    coords_df = pd.DataFrame(coords)
-    df['Latitude'] = coords_df['lat']
-    df['Longitude'] = coords_df['lon']
+    """Add coordinates to stations dataframe (lazy geocoding)"""
+    # Only geocode stations that don't have coordinates yet
+    for idx, row in df.iterrows():
+        if pd.isna(row.get('Latitude')) or pd.isna(row.get('Longitude')):
+            location = f"{row['TSCity']}, {row['TSState']}"
+            coord = geocode_location(location)
+            if coord:
+                df.at[idx, 'Latitude'] = coord[0]
+                df.at[idx, 'Longitude'] = coord[1]
     return df
 
 def filter_stations_by_distance(
-    df: pd.DataFrame, 
-    user_coords: tuple, 
+    df: pd.DataFrame,
+    user_coords: tuple,
     max_distance: float = None
 ) -> pd.DataFrame:
     """Filter and sort stations by distance from user"""
+    # Geocode stations that need it
+    df = geocode_stations(df)
+
     distances = []
     for _, row in df.iterrows():
         if pd.notna(row['Latitude']) and pd.notna(row['Longitude']):
@@ -187,17 +186,17 @@ def filter_stations_by_distance(
             distances.append(dist)
         else:
             distances.append(float('inf'))
-    
+
     df = df.copy()
     df['DistanceFromUser'] = distances
-    
+
     # Filter by max distance if specified
     if max_distance:
         df = df[df['DistanceFromUser'] <= max_distance]
-    
+
     # Sort by distance
     df = df.sort_values('DistanceFromUser')
-    
+
     return df
 
 def filter_stations_on_route(
@@ -276,20 +275,22 @@ fuel_data: pd.DataFrame = None
 async def startup_event():
     """Load fuel data on startup"""
     global fuel_data
-    
+
     # Check for fuel data file
     csv_paths = ["fuel_data.csv", "fuel_data.tsv", "/home/claude/fuel-agent/fuel_data.csv"]
-    
+
     for path in csv_paths:
         if os.path.exists(path):
             fuel_data = load_fuel_data(path)
             if not fuel_data.empty:
                 print(f"Loaded {len(fuel_data)} unique stations from {path}")
-                # Pre-geocode stations (this may take a while on first run)
-                fuel_data = geocode_stations(fuel_data)
-                print("Geocoding complete")
+                # Initialize coordinate columns but don't geocode on startup
+                # Geocoding will happen on-demand during queries
+                fuel_data['Latitude'] = None
+                fuel_data['Longitude'] = None
+                print("Fuel data loaded successfully. Geocoding will happen on-demand.")
                 break
-    
+
     if fuel_data is None or fuel_data.empty:
         print("Warning: No fuel data loaded. Please provide fuel_data.csv")
         fuel_data = pd.DataFrame()
@@ -515,4 +516,5 @@ async def find_on_route(
     }
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

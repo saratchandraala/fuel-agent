@@ -10,8 +10,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY fuel_data.csv .
 
-# Expose port
+# Expose port (Railway will set PORT env var)
 EXPOSE 8000
 
 # Run the application
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
