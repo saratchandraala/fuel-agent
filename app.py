@@ -520,10 +520,19 @@ async def process_query(request: QueryRequest):
     if fuel_data is None or fuel_data.empty:
         raise HTTPException(status_code=503, detail="Fuel data not loaded")
 
+    # Debug logging
+    print(f"\n{'='*60}")
+    print(f"NEW QUERY RECEIVED: {request.query}")
+    print(f"User location param: {request.user_location}")
+    print(f"User coords: ({request.user_lat}, {request.user_lon})")
+    print(f"{'='*60}\n")
+
     # Run location extraction in a thread pool to avoid blocking
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as executor:
         extracted = await loop.run_in_executor(executor, extract_locations_from_query, request.query)
+
+    print(f"Extracted location info: {extracted}")
 
     # Determine user coordinates - prioritize explicit parameters over extracted
     user_coords = None
@@ -541,18 +550,22 @@ async def process_query(request: QueryRequest):
         user_location_str = f"({request.user_lat}, {request.user_lon})"
     # Priority 2: Explicit user_location parameter
     elif request.user_location:
+        print(f"Using explicit user_location: {request.user_location}")
         # Run geocoding in parallel
         with ThreadPoolExecutor() as executor:
             user_coords = await loop.run_in_executor(executor, geocode_location, request.user_location)
         user_location_str = request.user_location
+        print(f"Geocoded to: {user_coords}")
         if not user_coords:
             raise HTTPException(status_code=400, detail=f"Could not geocode location: {request.user_location}")
     # Priority 3: Location extracted from query by Claude
     elif extracted.get("user_location"):
+        print(f"Using extracted user_location: {extracted['user_location']}")
         # Run geocoding in parallel
         with ThreadPoolExecutor() as executor:
             user_coords = await loop.run_in_executor(executor, geocode_location, extracted["user_location"])
         user_location_str = extracted["user_location"]
+        print(f"Geocoded to: {user_coords}")
         if not user_coords:
             raise HTTPException(status_code=400, detail=f"Could not geocode location: {extracted['user_location']}")
 
@@ -586,11 +599,13 @@ async def process_query(request: QueryRequest):
 
     # Filter by distance from user (if location provided)
     elif user_coords:
+        print(f"Filtering stations by distance from {user_coords} within {request.max_distance_miles} miles")
         filtered_data = filter_stations_by_distance(
             filtered_data,
             user_coords,
             max_distance=request.max_distance_miles
         )
+        print(f"Found {len(filtered_data)} stations after distance filtering")
 
     # No location - just sort by price for queries like "lowest price"
     else:
