@@ -442,6 +442,38 @@ async def test():
     print("TEST ENDPOINT CALLED!")  # Debug log
     return {"status": "ok", "message": "Test endpoint working"}
 
+@app.get("/debug")
+async def debug_info():
+    """Debug endpoint to check file system"""
+    cwd = os.getcwd()
+    files_in_cwd = os.listdir(cwd)
+
+    csv_paths = [
+        "fuel_data.csv",
+        "/app/fuel_data.csv",
+        os.path.join(cwd, "fuel_data.csv")
+    ]
+
+    path_checks = {path: os.path.exists(path) for path in csv_paths}
+
+    cache_paths = [
+        "geocode_cache.json",
+        "/app/geocode_cache.json",
+        os.path.join(cwd, "geocode_cache.json")
+    ]
+
+    cache_checks = {path: os.path.exists(path) for path in cache_paths}
+
+    return {
+        "cwd": cwd,
+        "files_in_cwd": files_in_cwd,
+        "csv_path_checks": path_checks,
+        "cache_path_checks": cache_checks,
+        "fuel_data_loaded": fuel_data is not None and not fuel_data.empty,
+        "stations_count": len(fuel_data) if fuel_data is not None else 0,
+        "location_cache_size": len(location_cache)
+    }
+
 @app.get("/stations")
 async def get_stations(limit: int = 20):
     """Get list of all stations"""
