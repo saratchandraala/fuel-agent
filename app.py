@@ -328,61 +328,90 @@ async def get_stations(limit: int = 20):
 async def process_query(request: QueryRequest):
     """Process a natural language fuel query"""
     global fuel_data
-    
+
     if fuel_data is None or fuel_data.empty:
         raise HTTPException(status_code=503, detail="Fuel data not loaded")
-    
-    # Extract location info from the query
+
+    # Extract location info from the query using Claude
     extracted = extract_locations_from_query(request.query)
-    
-    # Determine user coordinates
+
+    # Determine user coordinates - prioritize explicit parameters over extracted
     user_coords = None
-    if request.user_lat and request.user_lon:
+    user_location_str = None
+
+    # Priority 1: Explicit lat/lon coordinates
+    if request.user_lat is not None and request.user_lon is not None:
         user_coords = (request.user_lat, request.user_lon)
+        user_location_str = f"({request.user_lat}, {request.user_lon})"
+    # Priority 2: Explicit user_location parameter
     elif request.user_location:
         user_coords = geocode_location(request.user_location)
+        user_location_str = request.user_location
+        if not user_coords:
+            raise HTTPException(status_code=400, detail=f"Could not geocode location: {request.user_location}")
+    # Priority 3: Location extracted from query by Claude
     elif extracted.get("user_location"):
         user_coords = geocode_location(extracted["user_location"])
-    
+        user_location_str = extracted["user_location"]
+        if not user_coords:
+            raise HTTPException(status_code=400, detail=f"Could not geocode location: {extracted['user_location']}")
+
+    # If no location provided at all, return error
+    if not user_coords:
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide a location using user_location (city, state) or user_lat/user_lon coordinates"
+        )
+
     # Start with full dataset
     filtered_data = fuel_data.copy()
-    
+
     # Handle route queries
-    if extracted.get("is_route_query") and extracted.get("destination") and user_coords:
+    if extracted.get("is_route_query") and extracted.get("destination"):
         dest_coords = geocode_location(extracted["destination"])
         if dest_coords:
             filtered_data = filter_stations_on_route(
-                filtered_data, 
-                user_coords, 
+                filtered_data,
+                user_coords,
                 dest_coords,
                 max_deviation=request.max_distance_miles or 50
             )
             # Calculate distance from start for route ordering
             if not filtered_data.empty:
                 filtered_data = filter_stations_by_distance(filtered_data, user_coords)
-    
-    # Filter by distance from user
-    elif user_coords:
+        else:
+            raise HTTPException(status_code=400, detail=f"Could not geocode destination: {extracted['destination']}")
+
+    # Filter by distance from user (default behavior)
+    else:
         filtered_data = filter_stations_by_distance(
-            filtered_data, 
+            filtered_data,
             user_coords,
             max_distance=request.max_distance_miles
         )
-    
+
+    # Check if we have any results
+    if filtered_data.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No fuel stations found near {user_location_str}" +
+                   (f" within {request.max_distance_miles} miles" if request.max_distance_miles else "")
+        )
+
     # Sort by price if price filtering mentioned
     if extracted.get("price_filter"):
         filtered_data = filtered_data.sort_values('PumpPrice')
-    
+
     # Limit results
     filtered_data = filtered_data.head(request.max_results or 10)
     
     # Prepare context for Claude
     data_context = prepare_data_for_llm(filtered_data, request.max_results or 10)
-    
+
     # Generate response using Claude
     user_message = f"""User query: {request.query}
 
-User location: {request.user_location or extracted.get('user_location', 'Not specified')}
+User location: {user_location_str}
 Query type: {'Route query' if extracted.get('is_route_query') else 'Nearby search'}
 Destination: {extracted.get('destination', 'N/A')}
 
