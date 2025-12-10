@@ -390,9 +390,21 @@ async def startup_event():
     load_geocode_cache()
 
     # Check for fuel data file
-    csv_paths = ["fuel_data.csv", "fuel_data.tsv", "/home/claude/fuel-agent/fuel_data.csv"]
+    cwd = os.getcwd()
+    print(f"Current working directory: {cwd}")
+
+    csv_paths = [
+        "fuel_data.csv",
+        "fuel_data.tsv",
+        "/home/claude/fuel-agent/fuel_data.csv",
+        "/app/fuel_data.csv",  # Railway default
+        os.path.join(cwd, "fuel_data.csv")
+    ]
+
+    print(f"Looking for CSV in these paths: {csv_paths}")
 
     for path in csv_paths:
+        print(f"Checking path: {path} - exists: {os.path.exists(path)}")
         if os.path.exists(path):
             fuel_data = load_fuel_data(path)
             if not fuel_data.empty:
@@ -409,7 +421,8 @@ async def startup_event():
                 break
 
     if fuel_data is None or fuel_data.empty:
-        print("Warning: No fuel data loaded. Please provide fuel_data.csv")
+        print("⚠️  WARNING: No fuel data loaded. Please provide fuel_data.csv")
+        print(f"Files in current directory: {os.listdir(cwd)}")
         fuel_data = pd.DataFrame()
 
 @app.get("/")
