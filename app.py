@@ -626,6 +626,32 @@ async def process_query(request: QueryRequest):
     else:
         filtered_data = filtered_data.sort_values('PumpPrice')
 
+    # Apply price filtering if specified
+    if extracted.get("price_filter"):
+        price_filter_str = extracted["price_filter"].lower()
+        print(f"Applying price filter: {price_filter_str}")
+
+        # Extract price threshold from filter string
+        import re
+        price_match = re.search(r'\$?(\d+\.?\d*)', price_filter_str)
+
+        if price_match:
+            price_threshold = float(price_match.group(1))
+            print(f"Price threshold extracted: ${price_threshold}")
+
+            # Apply the appropriate filter
+            if any(keyword in price_filter_str for keyword in ["under", "less than", "below", "cheaper than"]):
+                print(f"Filtering for prices UNDER ${price_threshold}")
+                filtered_data = filtered_data[filtered_data['PumpPrice'] < price_threshold]
+            elif any(keyword in price_filter_str for keyword in ["over", "more than", "above", "greater than"]):
+                print(f"Filtering for prices OVER ${price_threshold}")
+                filtered_data = filtered_data[filtered_data['PumpPrice'] > price_threshold]
+            elif any(keyword in price_filter_str for keyword in ["exactly", "equal to"]):
+                print(f"Filtering for prices EQUAL to ${price_threshold}")
+                filtered_data = filtered_data[filtered_data['PumpPrice'] == price_threshold]
+
+            print(f"Stations after price filtering: {len(filtered_data)}")
+
     # Check if we have any results
     if filtered_data.empty:
         if extracted.get("is_route_query") and extracted.get("destination"):
@@ -642,7 +668,7 @@ async def process_query(request: QueryRequest):
         else:
             raise HTTPException(status_code=404, detail="No fuel stations found")
 
-    # Sort by price if price filtering mentioned
+    # Sort by price if price filtering mentioned or no location
     if extracted.get("price_filter") or not user_coords:
         filtered_data = filtered_data.sort_values('PumpPrice')
 
