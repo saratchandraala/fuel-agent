@@ -23,13 +23,48 @@ Returns service status and loaded station count.
 ```
 POST /query
 ```
-**Request Body:**
+
+**Request Parameters:**
+- `query` (required): Natural language query string
+- `user_location` (optional): City, State format (e.g., "Atlanta, GA")
+- `user_lat` (optional): Latitude coordinate
+- `user_lon` (optional): Longitude coordinate
+- `max_results` (optional): Maximum number of results (default: 10)
+- `max_distance_miles` (optional): Maximum distance to search in miles
+- `fuel_type` (optional): "diesel" or "regular" (default: "diesel")
+
+**Location Priority:**
+1. If `user_lat` and `user_lon` are provided, they are used
+2. If `user_location` is provided, it's geocoded to coordinates
+3. If neither is provided, the query is analyzed to extract location
+
+**Request Body Examples:**
+
+Using City/State:
 ```json
 {
-  "query": "Find cheap diesel near Atlanta, GA",
+  "query": "Find cheap diesel near me",
   "user_location": "Atlanta, GA",
   "max_results": 10,
   "max_distance_miles": 100
+}
+```
+
+Using Coordinates:
+```json
+{
+  "query": "Show me fuel prices",
+  "user_lat": 33.7490,
+  "user_lon": -84.3880,
+  "max_results": 5
+}
+```
+
+Using Query Extraction (location in query):
+```json
+{
+  "query": "Get me fuel prices near Ogden, Utah",
+  "max_results": 10
 }
 ```
 
@@ -37,8 +72,18 @@ POST /query
 ```json
 {
   "response": "| Station Name | Price/Gal | Distance (mi) | City, State |\n|---|---|---|---|\n| RACETRAC #688 | $3.70 | 15.2 | Lithia Springs, GA |\n...",
-  "stations": [...],
-  "query_interpreted": "{\"user_location\": \"Atlanta, GA\", ...}"
+  "stations": [
+    {
+      "station_name": "RACETRAC #688",
+      "city": "Lithia Springs",
+      "state": "GA",
+      "price": 3.6987,
+      "distance_miles": 15.2,
+      "latitude": 33.7940,
+      "longitude": -84.6630
+    }
+  ],
+  "query_interpreted": "{\"user_location\": \"Atlanta, GA\", \"is_route_query\": false, ...}"
 }
 ```
 
@@ -229,11 +274,43 @@ python app.py
 
 ## Example Queries
 
-- "Find the cheapest diesel near Atlanta, GA"
+### Simple Location Queries
+- "Find the cheapest diesel near me" (with `user_location: "Atlanta, GA"`)
+- "Show me fuel prices" (with `user_lat: 33.7490, user_lon: -84.3880`)
+- "Get me fuel prices near Ogden, Utah" (location extracted from query)
+
+### Route Queries
 - "What are fuel prices between Dallas and Houston?"
-- "Show me gas stations under $4 per gallon near Chicago"
 - "Find fuel stops along my route from Los Angeles to Phoenix"
+
+### Price Filtering
+- "Show me gas stations under $4 per gallon near Chicago"
+- "Find the cheapest diesel in California"
+
+### Specific Stations
 - "What's the nearest Pilot station to Indianapolis?"
+- "Show me Love's Travel Stops near me"
+
+## Testing the API
+
+A test script is included to verify all endpoints work correctly:
+
+```bash
+# Make sure the API is running locally
+python app.py
+
+# In another terminal, run the tests
+pip install requests
+python test_api.py
+```
+
+The test script will verify:
+- Health check endpoint
+- Query with city/state location
+- Query with lat/lon coordinates
+- Query for locations without nearby stations
+- Nearest stations endpoint
+- Error handling for missing location
 
 ## Data Format
 
